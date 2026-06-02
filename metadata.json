@@ -1,0 +1,6 @@
+{
+  "name": "Hand Movement Tracker",
+  "description": "Real-time hand gesture and motion tracking using advanced computer vision, offering live metrics, gesture recognition, and flow visualization.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
