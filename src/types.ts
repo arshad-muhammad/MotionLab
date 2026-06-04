@@ -9,8 +9,6 @@ export interface Landmark {
   z: number; // depth, wrist-relative
 }
 
-export type HandLandmarksList = Landmark[]; // Exactly 21 landmarks
-
 export interface BoundingBox {
   x: number;
   y: number;
@@ -18,35 +16,28 @@ export interface BoundingBox {
   height: number;
 }
 
-export interface FingerStates {
-  thumb: boolean;
-  index: boolean;
-  middle: boolean;
-  ring: boolean;
-  pinky: boolean;
+export interface SavedGesture {
+  id: string;
+  label: string;
+  hand: 'left' | 'right' | 'both';
+  landmarks: Landmark[]; // length 21 for left/right, 42 for both (first 21 Left, next 21 Right)
+  isPredefined?: boolean;
+  isTrained?: boolean;
 }
 
-export type HandGesture = 
-  | 'None'
-  | 'Fist'
-  | 'High Five'
-  | 'Peace'
-  | 'Thumbs Up'
-  | 'Thumbs Down'
-  | 'OK'
-  | 'Pointing'
-  | 'Rock On'
-  | 'Pinch';
+export interface RecognitionResult {
+  label: string;
+  confidence: number; // 0 to 100
+  hand: 'left' | 'right' | 'both';
+}
 
 export interface TrackingMetrics {
   timestamp: number;
   activeHandCount: number;
-  handOpenScore: number; // 0 to 1
-  speed: number; // relative units per second
-  gesture: HandGesture;
-  handPosition: { x: number; y: number; z: number };
-  boundingBox: BoundingBox | null;
-  fingerStates: FingerStates | null;
+  leftHandPresent: boolean;
+  rightHandPresent: boolean;
+  speed: number;
+  recognizedGesture: RecognitionResult | null;
 }
 
 export interface MovementLog {
@@ -55,25 +46,4 @@ export interface MovementLog {
   event: string;
   details: string;
   type: 'info' | 'success' | 'warning' | 'gesture';
-}
-
-export interface DrawingPoint {
-  x: number; // relative 0-1
-  y: number; // relative 0-1
-  isNewStroke?: boolean;
-}
-
-export interface DrawingStroke {
-  id: string;
-  points: DrawingPoint[];
-  color: string;
-  brushSize: number;
-}
-
-export interface AIReviewReport {
-  overallRating: string;
-  durationSeconds: number;
-  gesturesSummary: Record<HandGesture, number>;
-  biomechanicalAnalysis: string; // Markdown recommendations
-  exercisesSuggested: string[];
 }

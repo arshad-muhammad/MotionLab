@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Landmark, FingerStates, HandGesture } from '../types';
+import { Landmark, SavedGesture, RecognitionResult } from '../types';
 
 // Standard 3D distance between two landmarks
 export function getDistance(a: Landmark, b: Landmark): number {
@@ -14,132 +14,166 @@ export function getDistance(a: Landmark, b: Landmark): number {
   );
 }
 
-// Check which fingers are extended
-export function detectFingerStates(landmarks: Landmark[]): FingerStates {
-  if (!landmarks || landmarks.length < 21) {
-    return { thumb: false, index: false, middle: false, ring: false, pinky: false };
-  }
+/**
+ * Normalizes a hand coordinate set (21 landmarks) to be invariant of screen position and scale.
+ * 1. Translational Invariance: Moves the wrist (landmark 0) to (0,0,0).
+ * 2. Scale Invariance: Scales all joints so that the distance from wrist (0) to middle finger MCP (9) is exactly 1.0.
+ */
+export function normalizeHand(landmarks: Landmark[]): Landmark[] {
+  if (!landmarks || landmarks.length < 21) return [];
 
   const wrist = landmarks[0];
+  const middleMCP = landmarks[9];
   
-  // For standard fingers, compare distance from Wrist to Tip vs PIP joint
-  // If Tip is further from wrist than PIP, the finger is extended.
-  const isIndexExtended = getDistance(wrist, landmarks[8]) > getDistance(wrist, landmarks[6]);
-  const isMiddleExtended = getDistance(wrist, landmarks[12]) > getDistance(wrist, landmarks[10]);
-  const isRingExtended = getDistance(wrist, landmarks[16]) > getDistance(wrist, landmarks[14]);
-  const isPinkyExtended = getDistance(wrist, landmarks[20]) > getDistance(wrist, landmarks[18]);
+  // Calculate palm size scale factor
+  const scale = getDistance(wrist, middleMCP);
+  const scaleFactor = scale > 0.0001 ? scale : 1.0;
 
-  // For the thumb, compare the distance from the thumb tip to the index finger MCP (base of index)
-  // If it's far, the thumb is extended.
-  const thumbTip = landmarks[4];
-  const indexMCP = landmarks[5];
-  const thumbBase = landmarks[2];
-  
-  const thumbToIndexBaseDist = getDistance(thumbTip, indexMCP);
-  const thumbBaseToIndexBaseDist = getDistance(thumbBase, indexMCP);
-  
-  // If the thumb tip is pushed out away from the index finger base, it is extended
-  const isThumbExtended = thumbToIndexBaseDist > thumbBaseToIndexBaseDist * 1.1;
-
-  return {
-    thumb: isThumbExtended,
-    index: isIndexExtended,
-    middle: isMiddleExtended,
-    ring: isRingExtended,
-    pinky: isPinkyExtended,
-  };
+  return landmarks.map((lm) => ({
+    x: (lm.x - wrist.x) / scaleFactor,
+    y: (lm.y - wrist.y) / scaleFactor,
+    z: (lm.z - wrist.z) / scaleFactor,
+  }));
 }
 
-// Classify gesture from 21 hand landmarks
-export function classifyGesture(landmarks: Landmark[]): HandGesture {
-  if (!landmarks || landmarks.length < 21) return 'None';
-
-  const fingers = detectFingerStates(landmarks);
-  const wrist = landmarks[0];
-  const thumbTip = landmarks[4];
-  const indexTip = landmarks[8];
-  const middleTip = landmarks[12];
-  const ringTip = landmarks[16];
-  const pinkyTip = landmarks[20];
-
-  // 1. Pinch or OK checking: distance between thumb tip and index tip is very small
-  const thumbIndexDist = getDistance(thumbTip, indexTip);
-  // Normalize threshold based on palm size (distance from wrist to middle finger MCP)
-  const palmBase = landmarks[9];
-  const palmSize = getDistance(wrist, palmBase);
+/**
+ * Computes the Euclidean distance between two normalized coordinate vectors
+ */
+export function computeEuclideanDistance(a: Landmark[], b: Landmark[]): number {
+  if (a.length !== b.length || a.length === 0) return 999;
   
-  const isPinching = thumbIndexDist < palmSize * 0.25;
+  let sumSquaredDiff = 0;
+  for (let i = 0; i < a.length; i++) {
+    sumSquaredDiff += Math.pow(a[i].x - b[i].x, 2) +
+                      Math.pow(a[i].y - b[i].y, 2) +
+                      Math.pow(a[i].z - b[i].z, 2);
+  }
+  return Math.sqrt(sumSquaredDiff);
+}
 
-  if (isPinching) {
-    // If other fingers are extended, it's an "OK" gesture
-    if (fingers.middle && fingers.ring && fingers.pinky) {
-      return 'OK';
-    }
-    // Otherwise, standard pinch
-    return 'Pinch';
+/**
+ * Computes Cosine Similarity between two sets of landmarks by flattening them into vector spaces.
+ */
+export function computeCosineSimilarity(a: Landmark[], b: Landmark[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+
+  // Flatten landmarks into simple arrays of coordinates
+  const vecA: number[] = [];
+  const vecB: number[] = [];
+
+  for (let i = 0; i < a.length; i++) {
+    vecA.push(a[i].x, a[i].y, a[i].z);
+    vecB.push(b[i].x, b[i].y, b[i].z);
   }
 
-  // 2. Fist: All fingers are closed
-  if (!fingers.thumb && !fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
-    return 'Fist';
+  // Calculate dot product and norms
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
   }
 
-  // 3. High Five / Open Palm: All fingers are extended
-  if (fingers.index && fingers.middle && fingers.ring && fingers.pinky) {
-    return 'High Five';
-  }
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denominator < 0.0001) return 0;
+  return dotProduct / denominator;
+}
 
-  // 4. Peace: Index and Middle are extended, Ring and Pinky are closed
-  if (fingers.index && fingers.middle && !fingers.ring && !fingers.pinky) {
-    return 'Peace';
-  }
+/**
+ * Compares live hand frames with a library of stored gestures and returns the closest match, if any.
+ * @param liveLeft Live left hand landmarks (un-normalized)
+ * @param liveRight Live right hand landmarks (un-normalized)
+ * @param storedGestures Stored custom or predefined gestures
+ * @param matchAlgorithm 'euclidean' or 'cosine'
+ * @param confidenceThreshold Minimum threshold percent (e.g. 70) to count as a match
+ */
+export function recognizeGesture(
+  liveLeft: Landmark[] | null,
+  liveRight: Landmark[] | null,
+  storedGestures: SavedGesture[],
+  matchAlgorithm: 'euclidean' | 'cosine' = 'euclidean',
+  confidenceThreshold: number = 75
+): RecognitionResult | null {
+  // Filter out untrained slots
+  const activeGestures = storedGestures.filter((g) => g.isTrained && g.landmarks && g.landmarks.length > 0);
+  if (activeGestures.length === 0) return null;
 
-  // 5. Thumbs Up / Thumbs Down: Thumb is extended, everyone else is tucked
-  if (fingers.thumb && !fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
-    // Check orientation: if thumb tip is above wrist (y is smaller) or below wrist
-    if (thumbTip.y < wrist.y) {
-      return 'Thumbs Up';
+  let bestMatch: SavedGesture | null = null;
+  let highestConf = 0;
+
+  // Normalize live hands
+  const normLeft = liveLeft ? normalizeHand(liveLeft) : null;
+  const normRight = liveRight ? normalizeHand(liveRight) : null;
+
+  for (const gesture of activeGestures) {
+    let confidence = 0;
+
+    if (gesture.hand === 'both') {
+      // Must have both hands detected in the live stream
+      if (!normLeft || !normRight) continue;
+
+      // Stored landmarks contains 42 elements: first 21 Left, second 21 Right
+      const storedLeft = gesture.landmarks.slice(0, 21);
+      const storedRight = gesture.landmarks.slice(21, 42);
+
+      if (storedLeft.length < 21 || storedRight.length < 21) continue;
+
+      if (matchAlgorithm === 'euclidean') {
+        const distLeft = computeEuclideanDistance(storedLeft, normLeft);
+        const distRight = computeEuclideanDistance(storedRight, normRight);
+        const avgDist = (distLeft + distRight) / 2;
+
+        // Euclidean maximum expected difference for normalized hands is around 1.1 per hand
+        confidence = Math.max(0, Math.min(100, 100 * (1 - avgDist / 1.05)));
+      } else {
+        // Cosine similarity
+        const simLeft = computeCosineSimilarity(storedLeft, normLeft);
+        const simRight = computeCosineSimilarity(storedRight, normRight);
+        const avgSim = (simLeft + simRight) / 2;
+
+        // Map range [0.85, 1.0] to [0%, 100%]
+        confidence = Math.max(0, Math.min(100, ((avgSim - 0.85) / 0.15) * 100));
+      }
+    } else if (gesture.hand === 'left') {
+      // Compare only with the left hand
+      if (!normLeft) continue;
+
+      if (matchAlgorithm === 'euclidean') {
+        const dist = computeEuclideanDistance(gesture.landmarks, normLeft);
+        confidence = Math.max(0, Math.min(100, 100 * (1 - dist / 0.95)));
+      } else {
+        const sim = computeCosineSimilarity(gesture.landmarks, normLeft);
+        confidence = Math.max(0, Math.min(100, ((sim - 0.85) / 0.15) * 100));
+      }
     } else {
-      return 'Thumbs Down';
+      // Compare only with the right hand
+      if (!normRight) continue;
+
+      if (matchAlgorithm === 'euclidean') {
+        const dist = computeEuclideanDistance(gesture.landmarks, normRight);
+        confidence = Math.max(0, Math.min(100, 100 * (1 - dist / 0.95)));
+      } else {
+        const sim = computeCosineSimilarity(gesture.landmarks, normRight);
+        confidence = Math.max(0, Math.min(100, ((sim - 0.85) / 0.15) * 100));
+      }
+    }
+
+    if (confidence > highestConf) {
+      highestConf = confidence;
+      bestMatch = gesture;
     }
   }
 
-  // 6. Pointing: Only index is extended
-  if (fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) {
-    return 'Pointing';
+  if (bestMatch && highestConf >= confidenceThreshold) {
+    return {
+      label: bestMatch.label,
+      confidence: Math.round(highestConf),
+      hand: bestMatch.hand,
+    };
   }
 
-  // 7. Rock On: Index and Pinky are extended, others are closed
-  if (fingers.index && fingers.pinky && !fingers.middle && !fingers.ring) {
-    return 'Rock On';
-  }
-
-  return 'None';
-}
-
-// Calculate generic palm open score from 0 (closed fist) to 1 (fully open)
-export function calculateHandOpenScore(landmarks: Landmark[]): number {
-  if (!landmarks || landmarks.length < 21) return 0;
-  
-  const wrist = landmarks[0];
-  const palmBase = landmarks[9];
-  const palmSize = getDistance(wrist, palmBase);
-  if (palmSize === 0) return 0;
-
-  // Let's sum the distances of the 5 finger tips to the wrist, normalized by palm size
-  const tips = [landmarks[4], landmarks[8], landmarks[12], landmarks[16], landmarks[20]];
-  let scoreSum = 0;
-
-  for (const tip of tips) {
-    const dist = getDistance(wrist, tip);
-    // Relative distance compared to palm size
-    scoreSum += dist / palmSize;
-  }
-
-  // Normalize mapping (usually 5 fingers fully extended sums to ~10-14 relative palm sizes, fist sums to ~3-4)
-  const minExpected = 4;
-  const maxExpected = 11;
-  const score = (scoreSum - minExpected) / (maxExpected - minExpected);
-
-  return Math.max(0, Math.min(1, score));
+  return null;
 }

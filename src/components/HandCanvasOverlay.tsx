@@ -4,30 +4,26 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { Landmark, HandGesture, BoundingBox, DrawingStroke } from '../types';
+import { Landmark } from '../types';
 
 interface HandCanvasOverlayProps {
-  landmarksList: Landmark[][];
-  activeGesture: HandGesture;
-  boundingBox: BoundingBox | null;
-  drawMode: boolean;
-  brushColor: string;
-  brushSize: number;
-  strokes: DrawingStroke[];
+  leftHandLandmarks: Landmark[] | null;
+  rightHandLandmarks: Landmark[] | null;
+  recognizedLabel: string | null;
+  recognizedConfidence: number | null;
+  recognizedHand: 'left' | 'right' | 'both' | null;
 }
 
 export default function HandCanvasOverlay({
-  landmarksList,
-  activeGesture,
-  boundingBox,
-  drawMode,
-  brushColor,
-  brushSize,
-  strokes,
+  leftHandLandmarks,
+  rightHandLandmarks,
+  recognizedLabel,
+  recognizedConfidence,
+  recognizedHand
 }: HandCanvasOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Connection lines mapping for hand skeleton: [from, to]
+  // Connection lines mapping for hand skeletal structures: [from joint, to joint]
   const skeletonConnections = [
     // Thumb
     [0, 1], [1, 2], [2, 3], [3, 4],
@@ -39,7 +35,7 @@ export default function HandCanvasOverlay({
     [13, 14], [14, 15], [15, 16],
     // Pinky
     [0, 17], [17, 18], [18, 19], [19, 20],
-    // Knuckle bar
+    // Knuckle arch
     [5, 9], [9, 13], [13, 17],
   ];
 
@@ -47,10 +43,9 @@ export default function HandCanvasOverlay({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const canvasCtx = canvas.getContext('2d');
+    if (!canvasCtx) return;
 
-    // Handle resizing dynamically based on the display size of the canvas
     const resizeCanvas = () => {
       const rect = canvas.getBoundingClientRect();
       canvas.width = rect.width;
@@ -64,7 +59,6 @@ export default function HandCanvasOverlay({
     return () => resizeObserver.disconnect();
   }, []);
 
-  // Drawing Loop on Landmark Changes
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -72,176 +66,145 @@ export default function HandCanvasOverlay({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
+    const w = canvas.width;
+    const h = canvas.height;
 
-    // Clear previous frames
-    ctx.clearRect(0, 0, width, height);
+    // Clear canvas
+    ctx.clearRect(0, 0, w, h);
 
-    // Draw Persistent Whiteboard Strokes (Air Doodles)
-    if (strokes && strokes.length > 0) {
-      strokes.forEach((stroke) => {
-        if (stroke.points.length < 1) return;
-        ctx.beginPath();
-        ctx.strokeStyle = stroke.color;
-        ctx.lineWidth = stroke.brushSize;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.shadowBlur = 4;
-        ctx.shadowColor = stroke.color;
+    const drawHandMesh = (landmarks: Landmark[], side: 'left' | 'right') => {
+      if (!landmarks || landmarks.length < 21) return;
 
-        stroke.points.forEach((point, pIdx) => {
-          // Mirrored coordinate system mapping
-          const px = width - (point.x * width);
-          const py = point.y * height;
+      // Color scheme setting: Neon Lime for Right hand, bright electric cyan for Left hand
+      const strokeColor = side === 'right' ? '#D1FF26' : '#22D3EE';
+      const shadowColor = side === 'right' ? 'rgba(209, 255, 38, 0.6)' : 'rgba(34, 211, 238, 0.6)';
 
-          if (pIdx === 0 || point.isNewStroke) {
-            ctx.moveTo(px, py);
-          } else {
-            ctx.lineTo(px, py);
-          }
-        });
-        ctx.stroke();
-      });
-      // Reset shadows
-      ctx.shadowBlur = 0;
-    }
-
-    // Since we want drawings to persist even if there are no active hands detected,
-    // we do not return early if landmarksList is empty unless we draw hands!
-    if (landmarksList && landmarksList.length > 0) {
-      // Render each detected hand
-      landmarksList.forEach((landmarks) => {
-      if (landmarks.length < 21) return;
-
-      // Draw Connection Lines (Skeletons)
+      // 1. Draw Skeleton Lines
       ctx.beginPath();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = 'rgba(209, 255, 38, 0.85)'; // Neon lime (#D1FF26)
-      ctx.shadowBlur = 8;
-      ctx.shadowColor = '#D1FF26';
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = strokeColor;
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = shadowColor;
 
-      skeletonConnections.forEach(([fromIdx, toIdx]) => {
-        const fromNode = landmarks[fromIdx];
-        const toNode = landmarks[toIdx];
+      skeletonConnections.forEach(([fIdx, tIdx]) => {
+        const from = landmarks[fIdx];
+        const to = landmarks[tIdx];
 
-        // Apply javascript horizontal mirroring: x goes from 1-x
-        const startX = width - (fromNode.x * width);
-        const startY = fromNode.y * height;
-        const endX = width - (toNode.x * width);
-        const endY = toNode.y * height;
+        // Mirror horizontal drawing offset
+        const xStart = w - (from.x * w);
+        const yStart = from.y * h;
+        const xEnd = w - (to.x * w);
+        const yEnd = to.y * h;
 
-        ctx.moveTo(startX, startY);
-        ctx.lineTo(endX, endY);
+        ctx.moveTo(xStart, yStart);
+        ctx.lineTo(xEnd, yEnd);
       });
       ctx.stroke();
 
-      // Reset shadows for solid node drawing
+      // Reset shadows for solid landmark node fills
       ctx.shadowBlur = 0;
 
-      // Draw Joint Nodes (Landmarks)
-      landmarks.forEach((landmark, index) => {
-        const xPoint = width - (landmark.x * width);
-        const yPoint = landmark.y * height;
+      // 2. Draw Joints and Knuckles
+      landmarks.forEach((pt, idx) => {
+        const cx = w - (pt.x * w);
+        const cy = pt.y * h;
 
         ctx.beginPath();
-        
-        if (index === 4 || index === 8 || index === 12 || index === 16 || index === 20) {
-          // Tips - Glowing pure white tips with neon lime outline
-          ctx.arc(xPoint, yPoint, 6, 0, 2 * Math.PI);
-          ctx.fillStyle = '#ffffff';
-          ctx.strokeStyle = '#D1FF26';
+        if (idx === 4 || idx === 8 || idx === 12 || idx === 16 || idx === 20) {
+          // Finger Tips: White node core, neon outline
+          ctx.arc(cx, cy, 6.5, 0, 2 * Math.PI);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.strokeStyle = strokeColor;
           ctx.lineWidth = 2.5;
-        } else if (index === 0) {
-          // Wrist - Neon lime node
-          ctx.arc(xPoint, yPoint, 8, 0, 2 * Math.PI);
-          ctx.fillStyle = '#D1FF26';
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 2.5;
+        } else if (idx === 0) {
+          // Wrist: Accentuated larger node
+          ctx.arc(cx, cy, 8.5, 0, 2 * Math.PI);
+          ctx.fillStyle = strokeColor;
+          ctx.strokeStyle = '#FFFFFF';
+          ctx.lineWidth = 2;
         } else {
-          // Standard joints - subtle semi-transparent lime
-          ctx.arc(xPoint, yPoint, 4, 0, 2 * Math.PI);
-          ctx.fillStyle = 'rgba(209, 255, 38, 0.65)';
-          ctx.strokeStyle = 'rgba(10, 10, 10, 0.7)';
+          // Default joints
+          ctx.arc(cx, cy, 4, 0, 2 * Math.PI);
+          ctx.fillStyle = side === 'right' ? 'rgba(209, 255, 38, 0.8)' : 'rgba(34, 211, 238, 0.8)';
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
           ctx.lineWidth = 1;
         }
-        
         ctx.fill();
         ctx.stroke();
       });
 
-      // Draw Target Crosshair near index finger for styling
+      // 3. Draw Target Marker on the Index Tip with side info
       const indexTip = landmarks[8];
-      if (indexTip) {
-        const indexX = width - (indexTip.x * width);
-        const indexY = indexTip.y * height;
+      const wrist = landmarks[0];
+      if (indexTip && wrist) {
+        const indexX = w - (indexTip.x * w);
+        const indexY = indexTip.y * h;
 
         ctx.beginPath();
-        ctx.strokeStyle = 'rgba(209, 255, 38, 0.45)';
+        ctx.strokeStyle = side === 'right' ? 'rgba(209, 255, 38, 0.4)' : 'rgba(34, 211, 238, 0.4)';
         ctx.lineWidth = 1;
-        ctx.arc(indexX, indexY, 15, 0, 2 * Math.PI);
+        ctx.arc(indexX, indexY, 18, 0, 2 * Math.PI);
         ctx.stroke();
 
         ctx.beginPath();
-        ctx.moveTo(indexX - 20, indexY);
-        ctx.lineTo(indexX + 20, indexY);
-        ctx.moveTo(indexX, indexY - 20);
-        ctx.lineTo(indexX, indexY + 20);
-        ctx.stroke();
-      }
-
-      // Draw Gesture Label Tag next to Wrist
-      const wristNode = landmarks[0];
-      if (wristNode && activeGesture !== 'None') {
-        const wristX = width - (wristNode.x * width);
-        const wristY = wristNode.y * height - 20;
-
-        ctx.fillStyle = '#0A0A0A'; // Deep artistic black background
-        ctx.strokeStyle = '#D1FF26'; // Lime border accent
-        ctx.lineWidth = 1.5;
-
-        const labelText = activeGesture.toUpperCase();
-        ctx.font = 'bold 11px monospace';
-        const textMetrics = ctx.measureText(labelText);
-        const textWidth = textMetrics.width;
-        const rectWidth = textWidth + 24;
-        const rectHeight = 22;
-
-        const rectX = wristX - rectWidth / 2;
-        const rectY = wristY - rectHeight - 10;
-
-        // Draw pill card background for gesture HUD
-        ctx.beginPath();
-        ctx.roundRect(rectX, rectY, rectWidth, rectHeight, 2); // Squared corners for tech-art look
-        ctx.fill();
+        ctx.moveTo(indexX - 24, indexY);
+        ctx.lineTo(indexX + 24, indexY);
+        ctx.moveTo(indexX, indexY - 24);
+        ctx.lineTo(indexX, indexY + 24);
         ctx.stroke();
 
-        // Draw gesture name text
-        ctx.fillStyle = '#D1FF26';
-        ctx.fillText(labelText, rectX + 12, rectY + 15);
+        // Print Side label text next to Wrist bone
+        const wristX = w - (wrist.x * w);
+        const wristY = wrist.y * h + 24;
+
+        ctx.fillStyle = side === 'right' ? '#D1FF26' : '#22D3EE';
+        ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(side === 'right' ? 'RIGHT_HAND' : 'LEFT_HAND', wristX, wristY);
       }
-    });
+    };
+
+    // Draw Right and Left hands if present
+    if (leftHandLandmarks) {
+      drawHandMesh(leftHandLandmarks, 'left');
+    }
+    if (rightHandLandmarks) {
+      drawHandMesh(rightHandLandmarks, 'right');
     }
 
-    // Draw manual bounding box if supplied
-    if (boundingBox) {
-      const boxX = width - (boundingBox.x * width) - (boundingBox.width * width);
-      const boxY = boundingBox.y * height;
-      const boxW = boundingBox.width * width;
-      const boxH = boundingBox.height * height;
+    // Draw HUD text box on upper center of camera panel for live classification feedback
+    if (recognizedLabel && recognizedConfidence !== null) {
+      ctx.textAlign = 'center';
+      
+      const textX = w / 2;
+      const textY = 45;
 
-      ctx.strokeStyle = 'rgba(209, 255, 38, 0.35)';
+      // Draw elegant indicator card
+      const signText = `${recognizedLabel.toUpperCase()} (${recognizedConfidence}%)`;
+      ctx.font = 'black italic italic 15px sans-serif font-sans';
+      ctx.font = 'bold 13px monospace';
+      const measure = ctx.measureText(signText);
+      const cardW = measure.width + 36;
+      const cardH = 30;
+
+      ctx.fillStyle = 'rgba(5, 5, 5, 0.9)';
+      ctx.strokeStyle = '#D1FF26';
       ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 4]); // Dashed boundaries for scan design
-      ctx.strokeRect(boxX, boxY, boxW, boxH);
-      ctx.setLineDash([]); // Reset
+
+      ctx.beginPath();
+      ctx.roundRect(textX - cardW / 2, textY - cardH / 2, cardW, cardH, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#D1FF26';
+      ctx.fillText(signText, textX, textY + 4);
     }
 
-  }, [landmarksList, activeGesture, boundingBox]);
+  }, [leftHandLandmarks, rightHandLandmarks, recognizedLabel, recognizedConfidence, recognizedHand]);
 
   return (
     <canvas
-      id="hand-tracking-overlay"
+      id="sign-skeleton-overlay"
       ref={canvasRef}
       className="absolute top-0 left-0 w-full h-full pointer-events-none z-10"
     />
